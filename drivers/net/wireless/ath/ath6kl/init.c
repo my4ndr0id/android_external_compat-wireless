@@ -20,7 +20,6 @@
 #include <linux/errno.h>
 //#include <linux/of.h>
 #include <linux/mmc/sdio_func.h>
-#include <linux/vmalloc.h>
 #include "core.h"
 #include "cfg80211.h"
 #include "target.h"
@@ -30,8 +29,7 @@
 
 unsigned int debug_mask;
 static unsigned int testmode;
-/* Set WOW mode as default suspend mode */
-static unsigned int suspend_mode = 3;
+static unsigned int suspend_mode;
 static unsigned int wow_mode;
 static unsigned int uart_debug;
 
@@ -627,7 +625,7 @@ void ath6kl_core_cleanup(struct ath6kl *ar)
 
 	kfree(ar->fw_board);
 	kfree(ar->fw_otp);
-	vfree(ar->fw);
+	kfree(ar->fw);
 	kfree(ar->fw_patch);
 	kfree(ar->fw_testscript);
 
@@ -987,14 +985,13 @@ static int ath6kl_fetch_fw_apin(struct ath6kl *ar, const char *name)
 			if (ar->fw != NULL)
 				break;
 
-			ar->fw = vmalloc(ie_len);
+			ar->fw = kmemdup(data, ie_len, GFP_KERNEL);
 
 			if (ar->fw == NULL) {
 				ret = -ENOMEM;
 				goto out;
 			}
 
-			memcpy(ar->fw, data, ie_len);
 			ar->fw_len = ie_len;
 			break;
 		case ATH6KL_FW_IE_PATCH_IMAGE:
