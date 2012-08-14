@@ -148,14 +148,23 @@ enum htc_endpoint_id ath6kl_ac2_endpoint_id(void *devt, u8 ac)
 	return ar->ac2ep_map[ac];
 }
 
-struct ath6kl_cookie *ath6kl_alloc_cookie(struct ath6kl *ar)
+struct ath6kl_cookie *ath6kl_alloc_cookie(struct ath6kl *ar, bool isctrl)
 {
 	struct ath6kl_cookie *cookie;
 
-	cookie = ar->cookie_list;
-	if (cookie != NULL) {
-		ar->cookie_list = cookie->arc_list_next;
-		ar->cookie_count--;
+	/* If this cookie is for control packet*/
+	if (isctrl) {
+		cookie = ar->wmi_cookie_list;
+		if (cookie != NULL) {
+			ar->wmi_cookie_list = cookie->arc_list_next;
+			ar->wmi_cookie_count--;
+		}
+	} else {
+		cookie = ar->cookie_list;
+		if (cookie != NULL) {
+			ar->cookie_list = cookie->arc_list_next;
+			ar->cookie_count--;
+		}
 	}
 
 	return cookie;
@@ -165,31 +174,54 @@ void ath6kl_cookie_init(struct ath6kl *ar)
 {
 	u32 i;
 
+	/* Initilize data cookie list */
 	ar->cookie_list = NULL;
 	ar->cookie_count = 0;
 
 	memset(ar->cookie_mem, 0, sizeof(ar->cookie_mem));
 
 	for (i = 0; i < MAX_COOKIE_NUM; i++)
-		ath6kl_free_cookie(ar, &ar->cookie_mem[i]);
+		ath6kl_free_cookie(ar, &ar->cookie_mem[i], false);
+
+	/* Initilize control cookie list */
+	ar->wmi_cookie_list = NULL;
+	ar->wmi_cookie_count = 0;
+
+	memset(ar->wmi_cookie_mem, 0, sizeof(ar->wmi_cookie_mem));
+
+	for (i = 0; i < WMI_MAX_COOKIE_NUM; i++)
+		ath6kl_free_cookie(ar, &ar->wmi_cookie_mem[i], true);
 }
 
 void ath6kl_cookie_cleanup(struct ath6kl *ar)
 {
+	/* Cleanup the data cookie */
 	ar->cookie_list = NULL;
 	ar->cookie_count = 0;
+
+	/* Cleanup the control cookie */
+	ar->wmi_cookie_list = NULL;
+	ar->wmi_cookie_count = 0;
 }
 
-void ath6kl_free_cookie(struct ath6kl *ar, struct ath6kl_cookie *cookie)
+void ath6kl_free_cookie(struct ath6kl *ar, struct ath6kl_cookie *cookie,
+			bool isctrl)
 {
 	/* Insert first */
 
 	if (!ar || !cookie)
 		return;
 
-	cookie->arc_list_next = ar->cookie_list;
-	ar->cookie_list = cookie;
-	ar->cookie_count++;
+	/* If it is control cookie */
+	if (isctrl) {
+		cookie->arc_list_next = ar->wmi_cookie_list;
+		ar->wmi_cookie_list = cookie;
+		ar->wmi_cookie_count++;
+	} else {
+		cookie->arc_list_next = ar->cookie_list;
+		ar->cookie_list = cookie;
+		ar->cookie_count++;
+	}
 }
 
 /*
@@ -1109,7 +1141,11 @@ static struct net_device_stats *ath6kl_get_stats(struct net_device *dev)
 }
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,39))
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3,4,0))
+static int ath6kl_set_features(struct net_device *dev, netdev_features_t features)
+#else
 static int ath6kl_set_features(struct net_device *dev, u32 features)
+#endif
 {
 	struct ath6kl_vif *vif = netdev_priv(dev);
 	struct ath6kl *ar = vif->ar;

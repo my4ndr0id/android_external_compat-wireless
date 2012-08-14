@@ -1199,8 +1199,7 @@ enum wiphy_params_flags {
 struct cfg80211_bitrate_mask {
 	struct {
 		u32 legacy;
-		/* TODO: add support for masking MCS rates; e.g.: */
-		/* u8 mcs[IEEE80211_HT_MCS_MASK_LEN]; */
+		u8 mcs[IEEE80211_HT_MCS_MASK_LEN];
 	} control[IEEE80211_NUM_BANDS];
 };
 /**
@@ -1646,6 +1645,11 @@ struct cfg80211_ops {
 
 	int	(*notify_btcoex)(struct wiphy *wiphy,
 					   u8 *buf, int len);
+	int     (*set_wow_mode)(struct wiphy *wiphy,
+				struct cfg80211_wowlan *wow);
+
+	int     (*clr_wow_mode)(struct wiphy *wiphy);
+
 };
 
 /*

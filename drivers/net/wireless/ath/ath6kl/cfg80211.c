@@ -578,6 +578,9 @@ static int ath6kl_cfg80211_connect(struct wiphy *wiphy, struct net_device *dev,
 
 	vif->nw_type = vif->next_mode;
 
+	/* enable enhanced bmiss detection if applicable */
+	ath6kl_cfg80211_sta_bmiss_enhance(vif, true);
+
 	if (vif->wdev.iftype == NL80211_IFTYPE_P2P_CLIENT)
 		nw_subtype = SUBTYPE_P2PCLIENT;
 
@@ -1192,7 +1195,7 @@ static int ath6kl_cfg80211_add_key(struct wiphy *wiphy, struct net_device *ndev,
 
 	if (vif->nw_type == AP_NETWORK && !pairwise &&
 	    (key_type == TKIP_CRYPT || key_type == AES_CRYPT ||
-	     key_type == WAPI_CRYPT) && params) {
+	     key_type == WAPI_CRYPT)) {
 		ar->ap_mode_bkey.valid = true;
 		ar->ap_mode_bkey.key_index = key_index;
 		ar->ap_mode_bkey.key_type = key_type;
@@ -1573,6 +1576,9 @@ static int ath6kl_cfg80211_change_iface(struct wiphy *wiphy,
 			return -EINVAL;
 		}
 	}
+
+	/* need to clean up enhanced bmiss detection fw state */
+	ath6kl_cfg80211_sta_bmiss_enhance(vif, false);
 
 set_iface_type:
 	switch (type) {
@@ -2075,11 +2081,12 @@ static int ath6kl_cfg80211_host_sleep(struct ath6kl *ar, struct ath6kl_vif *vif)
 	int ret, left;
 
 	clear_bit(HOST_SLEEP_MODE_CMD_PROCESSED, &vif->flags);
+	set_bit(NOTIFY_HSLEEP_EVT, &vif->flags);
 
 	ret = ath6kl_wmi_set_host_sleep_mode_cmd(ar->wmi, vif->fw_vif_idx,
 						 ATH6KL_HOST_MODE_ASLEEP);
 	if (ret)
-		return ret;
+		goto hsleep_fail;
 
 	left = wait_event_interruptible_timeout(ar->event_wq,
 						is_hsleep_mode_procsed(vif),
@@ -2106,7 +2113,35 @@ static int ath6kl_cfg80211_host_sleep(struct ath6kl *ar, struct ath6kl_vif *vif)
 		}
 	}
 
+hsleep_fail:
+	if (ret)
+		clear_bit(NOTIFY_HSLEEP_EVT, &vif->flags);
+
 	return ret;
+}
+
+static int ath6kl_get_conn_vif(struct ath6kl *ar, struct ath6kl_vif **vif)
+{
+	struct ath6kl_vif *vif_temp;
+	bool connected = false;
+
+	list_for_each_entry(vif_temp, &ar->vif_list, list) {
+		if (test_bit(CONNECTED, &vif_temp->flags)) {
+			if (!connected) {
+				*vif = vif_temp;
+				connected = true;
+			} else
+				return -EIO;
+		}
+	}
+
+	if (!vif)
+		return -EIO;
+
+	if (!connected)
+		return -ENOTCONN;
+
+	return 0;
 }
 
 static int ath6kl_wow_suspend(struct ath6kl *ar, struct cfg80211_wowlan *wow)
@@ -2120,9 +2155,9 @@ static int ath6kl_wow_suspend(struct ath6kl *ar, struct cfg80211_wowlan *wow)
 	u8 index = 0;
 	__be32 ips[MAX_IP_ADDRS];
 
-	vif = ath6kl_vif_first(ar);
-	if (!vif)
-		return -EIO;
+	ret = ath6kl_get_conn_vif(ar, &vif);
+	if (ret)
+		return ret;
 
 	if (!ath6kl_cfg80211_ready(vif))
 		return -EIO;
@@ -2234,9 +2269,9 @@ static int ath6kl_wow_resume(struct ath6kl *ar)
 	struct ath6kl_vif *vif;
 	int ret;
 
-	vif = ath6kl_vif_first(ar);
-	if (!vif)
-		return -EIO;
+	ret = ath6kl_get_conn_vif(ar, &vif);
+	if (ret)
+		return ret;
 
 #ifdef CONFIG_HAS_WAKELOCK
 	wake_lock_timeout(&ar->wake_lock, 5);
@@ -2542,7 +2577,7 @@ void ath6kl_check_wow_status(struct ath6kl *ar, struct sk_buff *skb,
 static int ath6kl_set_htcap(struct ath6kl_vif *vif, enum ieee80211_band band,
 			    bool ht_enable)
 {
-	struct ath6kl_htcap *htcap = &vif->htcap;
+	struct ath6kl_htcap *htcap = &vif->htcap[band];
 
 	if (htcap->ht_enable == ht_enable)
 		return 0;
@@ -2856,6 +2891,30 @@ static int ath6kl_ap_beacon(struct wiphy *wiphy, struct net_device *dev,
 		return res;
 
 	return 0;
+}
+
+void ath6kl_cfg80211_sta_bmiss_enhance(struct ath6kl_vif *vif, bool enable)
+{
+	int err;
+
+	if (WARN_ON(!test_bit(WMI_READY, &vif->ar->flag)))
+		return;
+
+	if (vif->nw_type != INFRA_NETWORK)
+		return;
+
+	if (!test_bit(ATH6KL_FW_CAPABILITY_BMISS_ENHANCE,
+		      vif->ar->fw_capabilities))
+		return;
+
+	ath6kl_dbg(ATH6KL_DBG_WLAN_CFG, "%s fw bmiss enhance\n",
+		   enable ? "enable" : "disable");
+
+	err = ath6kl_wmi_sta_bmiss_enhance_cmd(vif->ar->wmi,
+					       vif->fw_vif_idx, enable);
+	if (err)
+		ath6kl_err("failed to %s enhanced bmiss detection: %d\n",
+			   enable ? "enable" : "disable", err);
 }
 
 static int ath6kl_add_beacon(struct wiphy *wiphy, struct net_device *dev,
@@ -3248,6 +3307,18 @@ static int ath6kl_cfg80211_sscan_stop(struct wiphy *wiphy,
 	return 0;
 }
 
+static int ath6kl_cfg80211_set_bitrate(struct wiphy *wiphy,
+				       struct net_device *dev,
+				       const u8 *addr,
+				       const struct cfg80211_bitrate_mask *mask)
+{
+	struct ath6kl *ar = ath6kl_priv(dev);
+	struct ath6kl_vif *vif = netdev_priv(dev);
+
+	return ath6kl_wmi_set_bitrate_mask(ar->wmi, vif->fw_vif_idx,
+					   mask);
+}
+
 static const struct ieee80211_txrx_stypes
 ath6kl_mgmt_stypes[NUM_NL80211_IFTYPES] = {
 	[NL80211_IFTYPE_STATION] = {
@@ -3315,6 +3386,7 @@ static struct cfg80211_ops ath6kl_cfg80211_ops = {
 	.notify_btcoex = ath6kl_notify_btcoex,
 	.sched_scan_start = ath6kl_cfg80211_sscan_start,
 	.sched_scan_stop = ath6kl_cfg80211_sscan_stop,
+	.set_bitrate_mask = ath6kl_cfg80211_set_bitrate,
 };
 
 void ath6kl_cfg80211_stop(struct ath6kl_vif *vif)
@@ -3473,6 +3545,16 @@ int ath6kl_register_ieee80211_hw(struct ath6kl *ar)
 		wiphy->max_match_sets = MAX_PROBED_SSIDS;
 
 	wiphy->max_scan_ie_len = 1000; /* FIX: what is correct limit? */
+	if (ar->hw.flags & ATH6KL_HW_FLAG_64BIT_RATES) {
+		ath6kl_band_2ghz.ht_cap.mcs.rx_mask[0] = 0xff;
+		ath6kl_band_5ghz.ht_cap.mcs.rx_mask[0] = 0xff;
+		ath6kl_band_2ghz.ht_cap.mcs.rx_mask[1] = 0xff;
+		ath6kl_band_5ghz.ht_cap.mcs.rx_mask[1] = 0xff;
+	} else {
+		ath6kl_band_2ghz.ht_cap.mcs.rx_mask[0] = 0xff;
+		ath6kl_band_5ghz.ht_cap.mcs.rx_mask[0] = 0xff;
+	}
+
 	wiphy->bands[IEEE80211_BAND_2GHZ] = &ath6kl_band_2ghz;
 	wiphy->bands[IEEE80211_BAND_5GHZ] = &ath6kl_band_5ghz;
 	wiphy->signal_type = CFG80211_SIGNAL_TYPE_MBM;
@@ -3571,12 +3653,17 @@ struct net_device *ath6kl_interface_add(struct ath6kl *ar, char *name,
 	vif->listen_intvl_t = ATH6KL_DEFAULT_LISTEN_INTVAL;
 	vif->bmiss_time_t = ATH6KL_DEFAULT_BMISS_TIME;
 	vif->bg_scan_period = 0;
-	vif->htcap.ht_enable = true;
+	vif->htcap[IEEE80211_BAND_2GHZ].ht_enable = true;
+	vif->htcap[IEEE80211_BAND_5GHZ].ht_enable = true;
 
 	memcpy(ndev->dev_addr, ar->mac_addr, ETH_ALEN);
-	if (fw_vif_idx != 0)
+	if (fw_vif_idx != 0) {
 		ndev->dev_addr[0] = (ndev->dev_addr[0] ^ (1 << fw_vif_idx)) |
 				     0x2;
+		if (test_bit(ATH6KL_FW_CAPABILITY_CUSTOM_MAC_ADDR,
+			     ar->fw_capabilities))
+			ndev->dev_addr[4] ^= 0x80;
+	}
 
 	init_netdev(ndev);
 
