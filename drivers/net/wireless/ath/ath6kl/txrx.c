@@ -287,8 +287,11 @@ int ath6kl_control_tx(void *devt, struct sk_buff *skb,
 	int status = 0;
 	struct ath6kl_cookie *cookie = NULL;
 
-	if (WARN_ON_ONCE(ar->state == ATH6KL_STATE_WOW))
+	if (WARN_ON_ONCE(ar->state == ATH6KL_STATE_WOW) ||
+	    test_bit(FW_ERR_RECOVERY_IN_PROGRESS, &ar->flag)) {
+		dev_kfree_skb(skb);
 		return -EACCES;
+	}
 
 	spin_lock_bh(&ar->lock);
 
@@ -360,7 +363,8 @@ int ath6kl_data_tx(struct sk_buff *skb, struct net_device *dev)
 		   skb, skb->data, skb->len);
 
 	/* If target is not associated */
-	if (!test_bit(CONNECTED, &vif->flags)) {
+	if (!test_bit(CONNECTED, &vif->flags) ||
+	    test_bit(FW_ERR_RECOVERY_IN_PROGRESS, &ar->flag)) {
 		dev_kfree_skb(skb);
 		return 0;
 	}
@@ -592,6 +596,7 @@ enum htc_send_full_action ath6kl_tx_queue_full(struct htc_target *target,
 		 */
 		set_bit(WMI_CTRL_EP_FULL, &ar->flag);
 		ath6kl_err("wmi ctrl ep is full\n");
+		ath6kl_fw_err_notify(ar, ATH6KL_FW_EP_FULL);
 		return action;
 	}
 
@@ -696,21 +701,28 @@ void ath6kl_tx_complete(void *context, struct list_head *packet_queue)
 		list_del(&packet->list);
 
 		ath6kl_cookie = (struct ath6kl_cookie *)packet->pkt_cntxt;
-		if (!ath6kl_cookie)
-			goto fatal;
+		if (WARN_ON_ONCE(!ath6kl_cookie))
+			continue;
 
 		status = packet->status;
 		skb = ath6kl_cookie->skb;
 		eid = packet->endpoint;
 		map_no = ath6kl_cookie->map_no;
 
-		if (!skb || !skb->data)
-			goto fatal;
+		if (WARN_ON_ONCE(!skb || !skb->data)) {
+			dev_kfree_skb(skb);
+			ath6kl_free_cookie(ar, ath6kl_cookie,
+					   eid == ar->ctrl_ep);
+			continue;
+		}
 
 		__skb_queue_tail(&skb_queue, skb);
 
-		if (!status && (packet->act_len != skb->len))
-			goto fatal;
+		if (WARN_ON_ONCE(!status && (packet->act_len != skb->len))) {
+			ath6kl_free_cookie(ar, ath6kl_cookie,
+					   eid == ar->ctrl_ep);
+			continue;
+		}
 
 		ar->tx_pending[eid]--;
 
@@ -792,11 +804,6 @@ void ath6kl_tx_complete(void *context, struct list_head *packet_queue)
 	if (wake_event)
 		wake_up(&ar->event_wq);
 
-	return;
-
-fatal:
-	WARN_ON(1);
-	spin_unlock_bh(&ar->lock);
 	return;
 }
 
