@@ -1,3 +1,4 @@
+ifeq ($(TARGET_PREBUILT_KERNEL),)
 LOCAL_PATH := $(call my-dir)
 DLKM_DIR := build/dlkm
 
@@ -57,3 +58,4 @@ LOCAL_MODULE_PATH        := $(TARGET_OUT)/lib/modules/alx
 include $(DLKM_DIR)/AndroidKernelModule.mk
 
 endif
+endif #TARGET_PREBUILT_KERNEL
