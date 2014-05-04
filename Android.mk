@@ -1,3 +1,4 @@
+ifeq ($(TARGET_PREBUILT_KERNEL),)
 LOCAL_PATH := $(call my-dir)
 ifeq ($(call is-android-codename,JELLY_BEAN),true)
 	DLKM_DIR := $(TOP)/device/qcom/common/dlkm
@@ -63,3 +64,4 @@ LOCAL_MODULE_PATH        := $(TARGET_OUT)/lib/modules/alx
 include $(DLKM_DIR)/AndroidKernelModule.mk
 
 endif
+endif #TARGET_PREBUILT_KERNEL
